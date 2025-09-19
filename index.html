@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DevLoad File Uploader - HWK AKAS</title>
+  <style>
+    body {
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: #f4f6f8;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .container {
+      background: #fff;
+      padding: 25px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      width: 460px;
+    }
+    h2 {
+      margin: 0 0 20px;
+      text-align: center;
+      color: #333;
+    }
+    .drop-zone {
+      border: 2px dashed #007bff;
+      border-radius: 10px;
+      padding: 30px;
+      text-align: center;
+      color: #666;
+      cursor: pointer;
+      transition: background 0.3s, border-color 0.3s;
+      margin-bottom: 15px;
+    }
+    .drop-zone.dragover {
+      background: #eaf3ff;
+      border-color: #0056b3;
+      color: #0056b3;
+    }
+    input[type="file"] { display: none; }
+    button {
+      padding: 10px 20px;
+      width: 100%;
+      border: none;
+      border-radius: 6px;
+      background: #007bff;
+      color: #fff;
+      font-size: 15px;
+      cursor: pointer;
+      transition: background 0.3s;
+      margin-bottom: 10px;
+    }
+    button:hover { background: #0056b3; }
+    #cancelBtn { background: #dc3545; }
+    #cancelBtn:hover { background: #a71d2a; }
+    #retryBtn { background: #ffc107; color: #000; }
+    #retryBtn:hover { background: #d39e00; }
+    .file-status {
+      margin-top: 15px;
+      font-size: 14px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 10px;
+    }
+    .file-name { font-weight: bold; margin-bottom: 5px; }
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background: #eee;
+      border-radius: 5px;
+      overflow: hidden;
+      margin: 6px 0;
+    }
+    .progress {
+      height: 100%;
+      width: 0%;
+      transition: width 0.2s ease, background 0.3s;
+    }
+    .progress.uploading { background: linear-gradient(90deg, #007bff, #20c997); }
+    .progress.success { background: #28a745; }
+    .progress.failed { background: #dc3545; }
+    .progress.cancelled { background: #fd7e14; }
+    .msg { font-size: 13px; }
+    #summary {
+      margin-top: 15px;
+      padding: 10px;
+      border-radius: 6px;
+      background: #f1f1f1;
+      font-size: 14px;
+      display: none;
+    }
+    .footer {
+      margin-top: 15px;
+      text-align: center;
+      font-size: 13px;
+      color: #666;
+    }
+    .footer strong { color: #007bff; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Drag & Drop Upload</h2>
+
+    <div class="drop-zone" id="dropZone">
+      Drag & drop files here, or <strong>click to browse</strong>
+      <input type="file" id="fileInput" multiple />
+    </div>
+
+    <button onclick="startUploadQueue()">Start Upload</button>
+    <button id="cancelBtn" onclick="cancelQueue()" disabled>Cancel Upload</button>
+    <button id="retryBtn" onclick="retryFailed()" disabled>Retry Failed</button>
+
+    <div id="fileStatus"></div>
+    <div id="summary"></div>
+
+    <div class="footer">Made by <strong>HWK AKAS</strong></div>
+  </div>
+
+  <script>
+    const API_KEY = "YOUR_API_KEY";
+    const PROJECT_ID = "YOUR_PROJECT_ID";
+    const API_URL = "https://api-devload.cloudcoderhub.in/upload";
+
+    let filesQueue = [];
+    let failedFiles = [];
+    let successCount = 0;
+    let failedCount = 0;
+    let cancelledCount = 0;
+    let isUploading = false;
+    let currentXhr = null;
+    let cancelRequested = false;
+
+    const dropZone = document.getElementById("dropZone");
+    const fileInput = document.getElementById("fileInput");
+    const summaryBox = document.getElementById("summary");
+
+    // Drag & Drop
+    dropZone.addEventListener("click", () => fileInput.click());
+    dropZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropZone.classList.add("dragover");
+    });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+    dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("dragover");
+      handleFiles(e.dataTransfer.files);
+    });
+
+    fileInput.addEventListener("change", (e) => handleFiles(e.target.files));
+
+    function handleFiles(selectedFiles) {
+      filesQueue = Array.from(selectedFiles);
+      const fileStatus = document.getElementById("fileStatus");
+      fileStatus.innerHTML = "";
+      summaryBox.style.display = "none";
+      filesQueue.forEach(file => {
+        const fileDiv = document.createElement("div");
+        fileDiv.classList.add("file-status");
+        fileDiv.innerHTML = `
+          <div class="file-name">${file.name}</div>
+          <div class="progress-bar"><div class="progress uploading"></div></div>
+          <div class="msg">Ready to upload...</div>
+        `;
+        fileStatus.appendChild(fileDiv);
+        file._ui = {
+          progressEl: fileDiv.querySelector(".progress"),
+          msgEl: fileDiv.querySelector(".msg")
+        };
+      });
+    }
+
+    function startUploadQueue(customFiles = null) {
+      const cancelBtn = document.getElementById("cancelBtn");
+      const retryBtn = document.getElementById("retryBtn");
+
+      if (!customFiles) {
+        if (!filesQueue.length) {
+          document.getElementById("fileStatus").innerHTML =
+            "<p style='color:red;'>Please select files first.</p>";
+          return;
+        }
+      } else {
+        filesQueue = customFiles;
+      }
+
+      failedFiles = [];
+      successCount = 0;
+      failedCount = 0;
+      cancelledCount = 0;
+      cancelRequested = false;
+      cancelBtn.disabled = false;
+      retryBtn.disabled = true;
+      summaryBox.style.display = "none";
+
+      if (!isUploading) processNextFile();
+    }
+
+    function processNextFile() {
+      if (cancelRequested || !filesQueue.length) {
+        finishUploads();
+        return;
+      }
+
+      isUploading = true;
+      const file = filesQueue.shift();
+      const { progressEl, msgEl } = file._ui;
+
+      uploadSingleFile(file, progressEl, msgEl, processNextFile);
+    }
+
+    function uploadSingleFile(file, progressEl, msgEl, callback) {
+      currentXhr = new XMLHttpRequest();
+      const url = `${API_URL}?projectId=${PROJECT_ID}`;
+
+      currentXhr.open("POST", url, true);
+      currentXhr.setRequestHeader("Authorization", `Bearer ${API_KEY}`);
+
+      progressEl.className = "progress uploading";
+      msgEl.textContent = "Uploading...";
+
+      currentXhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          progressEl.style.width = percent + "%";
+        }
+      };
+
+      currentXhr.onload = () => {
+        if (cancelRequested) {
+          progressEl.className = "progress cancelled";
+          msgEl.textContent = "Cancelled.";
+          msgEl.style.color = "orange";
+          cancelledCount++;
+          callback();
+          return;
+        }
+
+        if (currentXhr.status === 200) {
+          try {
+            const response = JSON.parse(currentXhr.responseText);
+            progressEl.style.width = "100%";
+            progressEl.className = "progress success";
+            msgEl.innerHTML = `Uploaded successfully. <a href="${response.url}" target="_blank">View</a>`;
+            msgEl.style.color = "green";
+            successCount++;
+          } catch (e) {
+            progressEl.className = "progress failed";
+            msgEl.textContent = "Success but invalid response.";
+            msgEl.style.color = "orange";
+            failedCount++;
+            failedFiles.push(file);
+          }
+        } else {
+          progressEl.className = "progress failed";
+          msgEl.textContent = "Upload failed (" + currentXhr.status + ")";
+          msgEl.style.color = "red";
+          failedCount++;
+          failedFiles.push(file);
+        }
+        callback();
+      };
+
+      currentXhr.onerror = () => {
+        if (!cancelRequested) {
+          progressEl.className = "progress failed";
+          msgEl.textContent = "Network error.";
+          msgEl.style.color = "red";
+          failedCount++;
+          failedFiles.push(file);
+        } else {
+          progressEl.className = "progress cancelled";
+          msgEl.textContent = "Cancelled.";
+          msgEl.style.color = "orange";
+          cancelledCount++;
+        }
+        callback();
+      };
+
+      const formData = new FormData();
+      formData.append("file", file);
+      currentXhr.send(formData);
+    }
+
+    function cancelQueue() {
+      cancelRequested = true;
+      if (currentXhr) currentXhr.abort();
+      finishUploads();
+    }
+
+    function finishUploads() {
+      isUploading = false;
+      filesQueue = [];
+      currentXhr = null;
+      document.getElementById("cancelBtn").disabled = true;
+      document.getElementById("retryBtn").disabled = failedFiles.length === 0;
+
+      summaryBox.innerHTML = `
+        <strong>Upload Summary:</strong><br>
+        Success: ${successCount}<br>
+        Failed: ${failedCount}<br>
+        Cancelled: ${cancelledCount}
+      `;
+      summaryBox.style.display = "block";
+    }
+
+    function retryFailed() {
+      if (!failedFiles.length) return;
+      failedFiles.forEach(file => {
+        file._ui.progressEl.style.width = "0%";
+        file._ui.progressEl.className = "progress uploading";
+        file._ui.msgEl.textContent = "Retrying...";
+        file._ui.msgEl.style.color = "black";
+      });
+      startUploadQueue(failedFiles);
+    }
+  </script>
+</body>
+</html>
